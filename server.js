@@ -8,36 +8,34 @@ const crypto = require('crypto');
 const app = express();
 const PORT = 3000;
 
-// --- CONFIGURACIÓN ---
+// Configuración de directorios y DB
 const DATA_DIR = fs.existsSync('/app/data') ? '/app/data' : path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = path.join(DATA_DIR, 'database.db');
 
-// AQUÍ ESTÁ EL TRUCO: Leemos la variable de entorno o usamos una por defecto
-const PUBLIC_DOMAIN = process.env.PUBLIC_URL || null;
+const appUrl = process.env.PUBLIC_URL || null;
 
 app.use(bodyParser.json());
 const db = new sqlite3.Database(DB_PATH);
 
-db.run(`CREATE TABLE IF NOT EXISTS links (
-    hash_corto TEXT PRIMARY KEY,
-    hash_original TEXT,
-    link_drive TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`);
+db.run(`CREATE TABLE IF NOT EXISTS links (hash_corto TEXT PRIMARY KEY, hash_original TEXT, link_drive TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 
+// Función segura de conversión
 function hexToBase62(hexStr) {
     const chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
     let result = '';
-    const cleanHex = hexStr.startsWith('0x') ? hexStr : '0x' + hexStr;
+    // Solo agregamos 0x si estamos seguros de que lo que sigue es Hex puro
     try {
-        let num = BigInt(cleanHex); 
+        let num = BigInt('0x' + hexStr); 
         while (num > 0n) {
             let remainder = num % 62n;
             result = chars[Number(remainder)] + result;
             num = num / 62n;
         }
-    } catch (e) { return null; }
+    } catch (e) {
+        console.error("Error matemático ignorado, usando fallback.");
+        return null; 
+    }
     return result || '0';
 }
 
@@ -45,36 +43,31 @@ app.post('/procesar', (req, res) => {
     let { linkDrive, hashOriginal } = req.body;
     if (!linkDrive || !hashOriginal) return res.status(400).json({ ok: false, error: 'Faltan datos' });
 
-    // Normalizar Hash
+    // --- CORRECCIÓN CRÍTICA ---
+    // Si el hash tiene letras que NO son a-f (como 'm', 'z', 'H'), es un ID de Drive.
+    // Lo convertimos a SHA256 para que sea un Hex válido.
     if (!/^[0-9a-fA-F]+$/.test(hashOriginal)) {
+        console.log("Detectado ID de Drive, convirtiendo a Hash seguro...");
         hashOriginal = crypto.createHash('sha256').update(hashOriginal).digest('hex');
     }
 
     const hashBase62 = hexToBase62(hashOriginal);
-    const hashMinimo = hashBase62.substring(0, 7);
+    // Si falló la conversión, usamos una parte del hash hexadecimal directamente
+    const hashMinimo = (hashBase62 || hashOriginal).substring(0, 7);
 
-    const query = `INSERT OR REPLACE INTO links (hash_corto, hash_original, link_drive) VALUES (?, ?, ?)`;
-    
-    db.run(query, [hashMinimo, hashOriginal, linkDrive], function(err) {
+    db.run(`INSERT OR REPLACE INTO links (hash_corto, hash_original, link_drive) VALUES (?, ?, ?)`, 
+    [hashMinimo, hashOriginal, linkDrive], function(err) {
         if (err) return res.status(500).json({ ok: false, error: err.message });
-
-        // --- CONSTRUCCIÓN INTELIGENTE DE URL ---
+        
         let finalUrl;
-        if (PUBLIC_DOMAIN) {
-            // Si configuraste tu dominio en Easypanel, usamos ese
-            // Quitamos la barra final si la pusiste por error
-            const domain = PUBLIC_DOMAIN.replace(/\/$/, "");
-            finalUrl = `${domain}/i/${hashMinimo}`;
+        if (appUrl) {
+            finalUrl = `${appUrl.replace(/\/$/, "")}/i/${hashMinimo}`;
         } else {
-            // Si no, usamos la interna (fallback)
             finalUrl = `${req.protocol}://${req.get('host')}/i/${hashMinimo}`;
         }
 
-        res.json({
-            ok: true,
-            hash_minimo: hashMinimo,
-            url_corta: finalUrl
-        });
+        console.log(`Link generado: ${finalUrl}`);
+        res.json({ ok: true, hash_minimo: hashMinimo, url_corta: finalUrl });
     });
 });
 
@@ -85,4 +78,6 @@ app.get('/i/:id', (req, res) => {
     });
 });
 
-app.listen(PORT, () => console.log(`🚀 Listo en puerto ${PORT}`));
+app.get('/', (req, res) => res.send('Microservicio Activo 🚀'));
+
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
